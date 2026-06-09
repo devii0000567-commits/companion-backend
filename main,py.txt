@@ -1,0 +1,82 @@
+﻿import os
+import io
+import asyncio
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from openai import OpenAI
+from PIL import Image
+import torch
+
+# FastAPI App Initialize
+app = FastAPI(title="AI Companion Backend")
+
+# OpenAI Client (यह आपके Environment Variable से API Key उठाएगा)
+client = OpenAI()
+
+# हाई-रिस्क कीवर्ड्स की लिस्ट (Crisis Shield)
+CRISIS_KEYWORDS = [
+    "end my life", "suicide", "want to die", "hurt myself", 
+    "ending it all", "don't want to live", "better off dead"
+]
+
+# चैट मैसेज के लिए डेटा स्ट्रक्चर
+class ChatMessage(BaseModel):
+    user_message: str
+
+# प्रॉम्प्ट्स (Prompts)
+NORMAL_PROMPT = (
+    "You are a handsome, warm, and highly supportive cartoon AI companion. "
+    "You speak directly to a close friend. Be incredibly encouraging, cheerful, "
+    "and lighthearted. Keep your responses brief (1-3 sentences) so they feel conversational."
+)
+
+CRISIS_PROMPT = (
+    "CRISIS MODE ACTIVATED. The user is expressing thoughts of self-harm. "
+    "Drop the casual cartoon character persona completely. Speak in an incredibly calm, "
+    "grounded, and gentle voice. Do not encourage their despair. Remind them that they "
+    "are safe, and instruct them clearly to tap the 'Get Help Now' button on their screen."
+)
+
+# 1. टेक्स्ट चैट एंडपॉइंट (Text Chat Endpoint)
+@app.post("/chat")
+async def chat_with_companion(message: ChatMessage):
+    user_text = message.user_message.lower()
+    
+    # क्राइसिस शील्ड चेक
+    is_crisis = any(keyword in user_text for keyword in CRISIS_KEYWORDS)
+    system_instructions = CRISIS_PROMPT if is_crisis else NORMAL_PROMPT
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_instructions},
+                {"role": "user", "content": message.user_message}
+            ]
+        )
+        ai_reply = response.choices[0].message.content
+        return {
+            "ai_response": ai_reply,
+            "trigger_crisis_ui": is_crisis
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. फोटो से कार्टून जनरेटर एंडपॉइंट (Photo to Cartoon Endpoint)
+@app.post("/generate-avatar")
+async def generate_avatar(file: UploadFile = File(...)):
+    if not torch.cuda.is_available():
+        # अगर आपके लोकल कंप्यूटर पर बड़ा GPU नहीं है, तो टेस्टिंग के लिए यह एक डमी इमेज वापस भेजेगा
+        # असली डिप्लॉयमेंट (जैसे Replicate/RunPod) पर यहाँ पूरा Stable Diffusion InstantID का मॉडल चलेगा
+        try:
+            input_bytes = await file.read()
+            img = Image.open(io.BytesIO(input_bytes))
+            img_io = io.BytesIO()
+            img.save(img_io, 'PNG')
+            img_io.seek(0)
+            return StreamingResponse(img_io, media_type="image/png")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+            
+    raise HTTPException(status_code=501, detail="GPU pipeline active on cloud deployment only.")
